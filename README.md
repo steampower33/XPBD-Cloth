@@ -61,10 +61,10 @@ Analytic SDF Collision 및 Vulkan Rendering Pipeline을 구현했습니다.
 
 - [x] Distance / Stretch — Graph-colored GS-style [Müller+07]
 - [x] Shear — Atomic Jacobi-style [Müller+14]
-- [x] Bend — Atomic Jacobi-style [Müller+07]
+- [x] Bend — Atomic Jacobi-style [Müller+07] (implemented, off by default; enable in the GUI)
 - [x] Area — Atomic Jacobi-style [Müller+14]
 - [x] Self-Collision — Atomic Jacobi-style
-- [x] Long Range Attachments (LRA) — Per-particle max-distance projection [Kim+12]
+- [x] Long Range Attachments (LRA) — Per-particle max-distance projection [Kim+12] (implemented, off by default; enable in the GUI)
 
 ### Collision
 
@@ -103,9 +103,9 @@ The cloth solver uses two different GPU constraint solving paths.
 
 #### Graph-colored Stretch Solver
 
-Stretch constraints are preprocessed using vertex-based graph coloring.
+Stretch constraints are preprocessed with greedy coloring of the constraint graph: each stretch edge takes the lowest color not already used by another edge that shares one of its vertices.
 
-Constraints within the same color do not share vertices, so they can be evaluated in parallel without atomic position updates.
+Constraints within the same color therefore do not share vertices, so they can be evaluated in parallel without atomic position updates.
 
 Each color is dispatched sequentially, and the predicted positions are updated in-place before the next color pass.
 
@@ -142,9 +142,11 @@ During development, additional stabilization was required for the atomic accumul
 ## Simulation Loop
 
 ```cpp
-void UpdateSimulation(float frameDt)
+void UpdateSimulation()
 {
-    const float h = frameDt / numSubsteps;
+    // Fixed simulation step: 1/60 s per frame, split into substeps.
+    // (Independent of the measured render frame time.)
+    const float h = (1.0f / 60.0f) / numSubsteps;
 
     for (uint32_t substep = 0; substep < numSubsteps; ++substep)
     {
@@ -242,12 +244,25 @@ The generated constraint count includes the cloth constraint data created for St
 
 ### Measured Performance
 
-In the recorded test configuration, the GPU physics simulation time was approximately:
+Measured on 2026-11-21 with the corrected GPU profiler:
 
-- **Physics Step: ~7.4 ms**
+- **Physics Step (sum of timed compute kernels): ~11.1 ms average** (10.8–11.2 ms across three runs; ~11.9–12.4 ms in sampled frames)
+- **Whole compute command buffer (incl. barriers / copies): ~12.0–12.5 ms** in sampled frames
 - **Particles: 63,001**
 - **Generated Constraints: ~751K**
 - **GPU: RTX 4060 Laptop GPU**
+
+Measurement conditions:
+
+- All constraints enabled: Stretch / Shear / Bend / Area / LRA
+- Self-Collision enabled (broadphase every 2 substeps)
+- 10 substeps × 4 solver iterations, fixed 1/60 s simulation step
+- Cloth resting on and being dragged across the floor plane
+- Times are GPU timestamp queries; "average" is the profiler's running average since application start
+
+The largest costs in this configuration were SolveStretch (~27%), SolveBend (~19%), BuildNeighbor (~15.5%), SolveSelfCollision (~10%), SolveShear (~9%) and SolveArea (~9%).
+
+> **Correction (2026-11-21):** An earlier version of this README reported **~7.4 ms**. That number came from a profiler bug: the profiler's "Total" left out the SolveStretch, SolveShear, Wind and SolveLRA kernels, and its timestamp index did not advance between substeps, so each per-kernel time was the first substep's time multiplied by the substep count. Both bugs are fixed in `src/simulation/cloth_gpu_profiler.cpp`, and the numbers above were re-measured with the fixed profiler.
 
 The reported time represents the measured physics workload for the tested scene and configuration.
 
@@ -303,6 +318,7 @@ The exact cost distribution depends on which constraints and collision features 
 - CMake >= 3.29
 - C++ 20
 - Vulkan 1.4-capable GPU / driver
+- `VK_EXT_shader_atomic_float` with `shaderBufferFloat32AtomicAdd` (float `atomicAdd` on storage buffers, used by the atomic accumulation solver)
 - Vulkan SDK
 - Visual Studio 2022 (MSVC) + C++ Desktop workload
 - vcpkg (set environment variable `VCPKG_ROOT` to your vcpkg directory, e.g. `C:\vcpkg`)
