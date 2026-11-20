@@ -71,52 +71,66 @@ void ClothGpuProfiler::CalculateGpuTime(ClothData& simData)
 	float tUpdate = 0.0f;
 	float tCalculateNormals = 0.0f;
 
-	uint32_t tsCnt = slots_per_iteration_;
-	uint32_t base = 1;
-	uint32_t afterIteration = 0;
+	// Walk the timestamps in the exact order ClothSimPass::RecordCompute writes them.
+	// The broad phase only writes its slots on substeps where (sub % broadphase_interval_ == 0),
+	// so the per-substep slot count varies and the cursor must advance per substep.
+	uint32_t expected = 1;
 	for (uint32_t sub = 0; sub < simData.substeps; sub++)
 	{
-		tWind += delta_ms(base + 0, base + 1);
-		tIntegrate += delta_ms(base + 2, base + 3);
-		tClearLambdas += delta_ms(base + 4, base + 5);
+		expected += slots_pre_hashing;
+		if (sub % simData.broadphase_interval_ == 0)
+			expected += slots_spatial_hashing_;
+		expected += simData.iterations * slots_per_iteration_ + slots_post_iteration_;
+	}
+	expected += slots_calculate_normals_ + 1;
+
+	// Settings changed between recording and readback: the layout no longer matches.
+	if (expected != numTimestamp) return;
+
+	uint32_t cur = 1;
+	for (uint32_t sub = 0; sub < simData.substeps; sub++)
+	{
+		tWind += delta_ms(cur + 0, cur + 1);
+		tIntegrate += delta_ms(cur + 2, cur + 3);
+		tClearLambdas += delta_ms(cur + 4, cur + 5);
+		cur += slots_pre_hashing;
 
 		if (sub % simData.broadphase_interval_ == 0)
 		{
-			tHashBuild += delta_ms(base + 6, base + 7);
-			tRadixSort += delta_ms(base + 8, base + 9);
-			tBuildCell += delta_ms(base + 10, base + 11);
-			tBuildNeighbor += delta_ms(base + 12, base + 13);
+			tHashBuild += delta_ms(cur + 0, cur + 1);
+			tRadixSort += delta_ms(cur + 2, cur + 3);
+			tBuildCell += delta_ms(cur + 4, cur + 5);
+			tBuildNeighbor += delta_ms(cur + 6, cur + 7);
+			cur += slots_spatial_hashing_;
 		}
 
-		uint32_t iterBase = base + 14;
 		for (uint32_t it = 0; it < simData.iterations; it++)
 		{
-			tSolveStretch += delta_ms(iterBase + it * tsCnt + 0, iterBase + it * tsCnt + 1);
-			tSolveShear += delta_ms(iterBase + it * tsCnt + 2, iterBase + it * tsCnt + 3);
-			tSolveBend += delta_ms(iterBase + it * tsCnt + 4, iterBase + it * tsCnt + 5);
-			tSolveArea += delta_ms(iterBase + it * tsCnt + 6, iterBase + it * tsCnt + 7);
-			tSolveSelfCollision += delta_ms(iterBase + it * tsCnt + 8, iterBase + it * tsCnt + 9);
-			tApplyDeltas += delta_ms(iterBase + it * tsCnt + 10, iterBase + it * tsCnt + 11);
+			tSolveStretch += delta_ms(cur + 0, cur + 1);
+			tSolveShear += delta_ms(cur + 2, cur + 3);
+			tSolveBend += delta_ms(cur + 4, cur + 5);
+			tSolveArea += delta_ms(cur + 6, cur + 7);
+			tSolveSelfCollision += delta_ms(cur + 8, cur + 9);
+			tApplyDeltas += delta_ms(cur + 10, cur + 11);
+			cur += slots_per_iteration_;
 		}
-		afterIteration = iterBase + simData.iterations * tsCnt;
 
-		tSolveLRA += delta_ms(afterIteration + 0, afterIteration + 1);
-		tCollideSdf += delta_ms(afterIteration + 2, afterIteration + 3);
-		tUpdate += delta_ms(afterIteration + 4, afterIteration + 5);
+		tSolveLRA += delta_ms(cur + 0, cur + 1);
+		tCollideSdf += delta_ms(cur + 2, cur + 3);
+		tUpdate += delta_ms(cur + 4, cur + 5);
+		cur += slots_post_iteration_;
 	}
-	uint32_t afterSubstep = afterIteration + slots_post_iteration_;
 
-	tCalculateNormals = delta_ms(afterSubstep, afterSubstep + 1) + delta_ms(afterSubstep + 2, afterSubstep + 3);
+	tCalculateNormals = delta_ms(cur + 0, cur + 1) + delta_ms(cur + 2, cur + 3);
 
 	pass_total_time_ = delta_ms(0, numTimestamp - 1);
 
-	//std::cout << pass_total_time_ << std::endl;
-
+	// Sum of every timed kernel (excludes barriers/copies between them; see pass_total_time_).
 	float total =
-		tIntegrate + tClearLambdas +
+		tWind + tIntegrate + tClearLambdas +
 		tHashBuild + tRadixSort + tBuildCell + tBuildNeighbor +
-		tSolveBend + tSolveArea + tSolveSelfCollision + tApplyDeltas +
-		tCollideSdf + tUpdate +
+		tSolveStretch + tSolveShear + tSolveBend + tSolveArea + tSolveSelfCollision + tApplyDeltas +
+		tSolveLRA + tCollideSdf + tUpdate +
 		tCalculateNormals;
 
 	uint32_t c = 0;
